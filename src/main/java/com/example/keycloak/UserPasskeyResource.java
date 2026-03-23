@@ -14,11 +14,13 @@ import com.webauthn4j.data.client.challenge.Challenge;
 import com.webauthn4j.data.client.challenge.DefaultChallenge;
 import com.webauthn4j.server.ServerProperty;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.OPTIONS;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -28,6 +30,7 @@ import org.jboss.logging.Logger;
 import org.keycloak.OAuth2Constants;
 import org.keycloak.common.util.Base64Url;
 import org.keycloak.credential.CredentialProvider;
+import org.keycloak.credential.CredentialModel;
 import org.keycloak.credential.WebAuthnCredentialModelInput;
 import org.keycloak.credential.WebAuthnCredentialProvider;
 import org.keycloak.credential.WebAuthnPasswordlessCredentialProviderFactory;
@@ -56,6 +59,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -190,6 +194,79 @@ public class UserPasskeyResource {
         } catch (IllegalArgumentException | JsonProcessingException e) {
             return buildErrorResponse(Response.Status.BAD_REQUEST, "Invalid registration payload: " + e.getMessage());
         }
+    }
+
+    @GET
+    @Path("credentials")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response listPasskeys(@HeaderParam("Authorization") String authorizationHeader) {
+        RealmModel realm = session().getContext().getRealm();
+        UserModel user = getUserFromBearerToken(realm, authorizationHeader);
+        if (user == null) {
+            return buildErrorResponse(Response.Status.UNAUTHORIZED, "Authenticated user not found from access token");
+        }
+
+        List<Map<String, Object>> credentials = user.credentialManager()
+                .getStoredCredentialsByTypeStream(WebAuthnCredentialModel.TYPE_PASSWORDLESS)
+                .map(WebAuthnCredentialModel::createFromCredentialModel)
+                .map(credential -> {
+                    String credentialId = credential.getWebAuthnCredentialData() == null
+                            ? null
+                            : credential.getWebAuthnCredentialData().getCredentialId();
+                    String normalizedCredentialId = normalizeCredentialId(credentialId);
+                    String aaguid = credential.getWebAuthnCredentialData() == null
+                            ? null
+                            : credential.getWebAuthnCredentialData().getAaguid();
+
+                    Map<String, Object> credentialView = new LinkedHashMap<>();
+                    credentialView.put("id", credential.getId());
+                    credentialView.put("name", PasskeyConfigResolver.firstNonBlank(credential.getUserLabel(), "Passkey"));
+                    credentialView.put("createdDate", credential.getCreatedDate());
+                    credentialView.put("credentialId", normalizedCredentialId);
+                    credentialView.put("aaguid", aaguid);
+                    return credentialView;
+                })
+                .toList();
+
+        return jsonOk(Map.of(
+                "credentials", credentials,
+                "count", credentials.size()
+        ));
+    }
+
+    @DELETE
+    @Path("credentials/{credentialModelId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deletePasskey(
+            @PathParam("credentialModelId") String credentialModelId,
+            @HeaderParam("Authorization") String authorizationHeader
+    ) {
+        RealmModel realm = session().getContext().getRealm();
+        UserModel user = getUserFromBearerToken(realm, authorizationHeader);
+        if (user == null) {
+            return buildErrorResponse(Response.Status.UNAUTHORIZED, "Authenticated user not found from access token");
+        }
+
+        if (credentialModelId == null || credentialModelId.isBlank()) {
+            return buildErrorResponse(Response.Status.BAD_REQUEST, "credentialModelId is required");
+        }
+
+        CredentialModel storedCredential = user.credentialManager().getStoredCredentialById(credentialModelId);
+        if (storedCredential == null || !WebAuthnCredentialModel.TYPE_PASSWORDLESS.equals(storedCredential.getType())) {
+            return buildErrorResponse(Response.Status.NOT_FOUND, "Passkey not found");
+        }
+
+        String credentialId = WebAuthnCredentialModel.createFromCredentialModel(storedCredential)
+                .getWebAuthnCredentialData()
+                .getCredentialId();
+
+        boolean removed = user.credentialManager().removeStoredCredentialById(credentialModelId);
+        if (!removed) {
+            return buildErrorResponse(Response.Status.INTERNAL_SERVER_ERROR, "Failed to delete passkey");
+        }
+
+        removeCredentialUserMapping(user, credentialId);
+        return jsonOk(Map.of("status", "deleted"));
     }
 
     // Uses bearer access token subject as the owner of the passkey registration.
@@ -602,6 +679,25 @@ public class UserPasskeyResource {
         }
     }
 
+    private void removeCredentialUserMapping(UserModel user, String credentialId) {
+        String normalizedCredentialId = normalizeCredentialId(credentialId);
+        if (normalizedCredentialId == null) {
+            return;
+        }
+
+        List<String> values = new ArrayList<>(user.getAttributeStream(CREDENTIAL_USER_ATTR).toList());
+        if (!values.remove(normalizedCredentialId)) {
+            return;
+        }
+
+        if (values.isEmpty()) {
+            user.removeAttribute(CREDENTIAL_USER_ATTR);
+            return;
+        }
+
+        user.setAttribute(CREDENTIAL_USER_ATTR, values);
+    }
+
     private void validateRegistrationCompat(WebAuthnRegistrationManager manager, RegistrationRequest request, RegistrationData data, RegistrationParameters parameters) {
         String[] methodNames = {"verify", "validate"};
         Class<?>[][] signatures = {
@@ -668,11 +764,11 @@ public class UserPasskeyResource {
         return parsedUri.getHost();
     }
 
-    private Response jsonOk(Map<String, String> payload) {
+    private Response jsonOk(Object payload) {
         return jsonResponse(Response.Status.OK, payload);
     }
 
-    private Response jsonResponse(Response.Status status, Map<String, String> payload) {
+    private Response jsonResponse(Response.Status status, Object payload) {
         String jsonPayload = toJson(payload);
         Response.ResponseBuilder builder = status == Response.Status.OK
                 ? Response.ok(jsonPayload)
@@ -687,7 +783,7 @@ public class UserPasskeyResource {
                 .build());
     }
 
-    private String toJson(Map<String, String> payload) {
+    private String toJson(Object payload) {
         try {
             return OBJECT_MAPPER.writeValueAsString(payload);
         } catch (JsonProcessingException e) {
