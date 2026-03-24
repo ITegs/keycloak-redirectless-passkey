@@ -14,13 +14,11 @@ import com.webauthn4j.data.client.challenge.Challenge;
 import com.webauthn4j.data.client.challenge.DefaultChallenge;
 import com.webauthn4j.server.ServerProperty;
 import jakarta.ws.rs.Consumes;
-import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.OPTIONS;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
-import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -28,12 +26,15 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.keycloak.OAuth2Constants;
+import org.keycloak.common.ClientConnection;
 import org.keycloak.common.util.Base64Url;
+import org.keycloak.common.util.Time;
 import org.keycloak.credential.CredentialProvider;
-import org.keycloak.credential.CredentialModel;
 import org.keycloak.credential.WebAuthnCredentialModelInput;
 import org.keycloak.credential.WebAuthnCredentialProvider;
 import org.keycloak.credential.WebAuthnPasswordlessCredentialProviderFactory;
+import org.keycloak.events.EventBuilder;
+import org.keycloak.events.EventType;
 import org.keycloak.models.AuthenticatedClientSessionModel;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientSessionContext;
@@ -43,9 +44,9 @@ import org.keycloak.models.SingleUseObjectProvider;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
 import org.keycloak.models.credential.WebAuthnCredentialModel;
+import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.protocol.oidc.TokenManager;
 import org.keycloak.representations.AccessToken;
-import org.keycloak.representations.RefreshToken;
 import org.keycloak.services.Urls;
 import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.services.util.DefaultClientSessionContext;
@@ -59,7 +60,6 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -72,6 +72,7 @@ public class UserPasskeyResource {
     private final KeycloakSession session;
     private static final Logger logger = Logger.getLogger(UserPasskeyResource.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final String PASSKEY_TYPE = WebAuthnCredentialModel.TYPE_PASSWORDLESS;
     private static final long CHALLENGE_TTL_SECONDS = 120;
     private static final long CHALLENGE_TTL_MILLIS = CHALLENGE_TTL_SECONDS * 1000;
     private static final String CHALLENGE_KEY_PREFIX = "passkey:challenge:";
@@ -136,7 +137,7 @@ public class UserPasskeyResource {
     @Path("{any:.*}")
     public Response corsPreflight() {
         Response.ResponseBuilder b = Response.ok()
-                .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                .header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
                 .header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept")
                 .header("Access-Control-Max-Age", "3600");
         return withCors(b.build());
@@ -151,7 +152,7 @@ public class UserPasskeyResource {
     }
 
     @GET
-    @Path("/get-credential-id")
+    @Path("get-credential-id")
     @Produces(MediaType.APPLICATION_JSON)
     public Response getCredentialId(@QueryParam("username") String username) {
         String challengeBase64 = issueChallenge();
@@ -182,8 +183,7 @@ public class UserPasskeyResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
     public Response savePasskey(PasskeyRequest request, @HeaderParam("Authorization") String authorizationHeader) {
-        RealmModel realm = session().getContext().getRealm();
-        UserModel user = getUserFromBearerToken(realm, authorizationHeader);
+        UserModel user = getUserFromBearerToken(authorizationHeader);
         if (user == null) {
             return textResponse(Response.Status.UNAUTHORIZED, "Authenticated user not found from access token");
         }
@@ -196,81 +196,8 @@ public class UserPasskeyResource {
         }
     }
 
-    @GET
-    @Path("credentials")
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response listPasskeys(@HeaderParam("Authorization") String authorizationHeader) {
-        RealmModel realm = session().getContext().getRealm();
-        UserModel user = getUserFromBearerToken(realm, authorizationHeader);
-        if (user == null) {
-            return buildErrorResponse(Response.Status.UNAUTHORIZED, "Authenticated user not found from access token");
-        }
-
-        List<Map<String, Object>> credentials = user.credentialManager()
-                .getStoredCredentialsByTypeStream(WebAuthnCredentialModel.TYPE_PASSWORDLESS)
-                .map(WebAuthnCredentialModel::createFromCredentialModel)
-                .map(credential -> {
-                    String credentialId = credential.getWebAuthnCredentialData() == null
-                            ? null
-                            : credential.getWebAuthnCredentialData().getCredentialId();
-                    String normalizedCredentialId = normalizeCredentialId(credentialId);
-                    String aaguid = credential.getWebAuthnCredentialData() == null
-                            ? null
-                            : credential.getWebAuthnCredentialData().getAaguid();
-
-                    Map<String, Object> credentialView = new LinkedHashMap<>();
-                    credentialView.put("id", credential.getId());
-                    credentialView.put("name", PasskeyConfigResolver.firstNonBlank(credential.getUserLabel(), "Passkey"));
-                    credentialView.put("createdDate", credential.getCreatedDate());
-                    credentialView.put("credentialId", normalizedCredentialId);
-                    credentialView.put("aaguid", aaguid);
-                    return credentialView;
-                })
-                .toList();
-
-        return jsonOk(Map.of(
-                "credentials", credentials,
-                "count", credentials.size()
-        ));
-    }
-
-    @DELETE
-    @Path("credentials/{credentialModelId}")
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response deletePasskey(
-            @PathParam("credentialModelId") String credentialModelId,
-            @HeaderParam("Authorization") String authorizationHeader
-    ) {
-        RealmModel realm = session().getContext().getRealm();
-        UserModel user = getUserFromBearerToken(realm, authorizationHeader);
-        if (user == null) {
-            return buildErrorResponse(Response.Status.UNAUTHORIZED, "Authenticated user not found from access token");
-        }
-
-        if (credentialModelId == null || credentialModelId.isBlank()) {
-            return buildErrorResponse(Response.Status.BAD_REQUEST, "credentialModelId is required");
-        }
-
-        CredentialModel storedCredential = user.credentialManager().getStoredCredentialById(credentialModelId);
-        if (storedCredential == null || !WebAuthnCredentialModel.TYPE_PASSWORDLESS.equals(storedCredential.getType())) {
-            return buildErrorResponse(Response.Status.NOT_FOUND, "Passkey not found");
-        }
-
-        String credentialId = WebAuthnCredentialModel.createFromCredentialModel(storedCredential)
-                .getWebAuthnCredentialData()
-                .getCredentialId();
-
-        boolean removed = user.credentialManager().removeStoredCredentialById(credentialModelId);
-        if (!removed) {
-            return buildErrorResponse(Response.Status.INTERNAL_SERVER_ERROR, "Failed to delete passkey");
-        }
-
-        removeCredentialUserMapping(user, credentialId);
-        return jsonOk(Map.of("status", "deleted"));
-    }
-
     // Uses bearer access token subject as the owner of the passkey registration.
-    private UserModel getUserFromBearerToken(RealmModel realm, String authorizationHeader) {
+    private UserModel getUserFromBearerToken(String authorizationHeader) {
         if (authorizationHeader == null || authorizationHeader.isBlank()) {
             return null;
         }
@@ -288,6 +215,7 @@ public class UserPasskeyResource {
             return null;
         }
 
+        RealmModel realm = session().getContext().getRealm();
         return session().users().getUserById(realm, accessToken.getSubject());
     }
 
@@ -399,7 +327,7 @@ public class UserPasskeyResource {
     private WebAuthnCredentialModel findFirstPasswordlessCredential(UserModel user) {
         return user.credentialManager()
                 .getStoredCredentialsStream()
-                .filter(cred -> WebAuthnCredentialModel.TYPE_PASSWORDLESS.equals(cred.getType()))
+                .filter(cred -> PASSKEY_TYPE.equals(cred.getType()))
                 .findFirst()
                 .map(WebAuthnCredentialModel::createFromCredentialModel)
                 .orElse(null);
@@ -474,7 +402,7 @@ public class UserPasskeyResource {
         }
 
         return user.credentialManager()
-                .getStoredCredentialsByTypeStream(WebAuthnCredentialModel.TYPE_PASSWORDLESS)
+                .getStoredCredentialsByTypeStream(PASSKEY_TYPE)
                 .map(WebAuthnCredentialModel::createFromCredentialModel)
                 .filter(credential -> {
                     String storedCredentialId = credential.getWebAuthnCredentialData().getCredentialId();
@@ -512,7 +440,7 @@ public class UserPasskeyResource {
                 signature
         );
         var authParams = new WebAuthnCredentialModelInput.KeycloakWebAuthnAuthenticationParameters(serverProperty, isUVFlagChecked);
-        var cred = new WebAuthnCredentialModelInput(WebAuthnCredentialModel.TYPE_PASSWORDLESS);
+        var cred = new WebAuthnCredentialModelInput(PASSKEY_TYPE);
 
         cred.setAuthenticationRequest(authReq);
         cred.setAuthenticationParameters(authParams);
@@ -523,8 +451,12 @@ public class UserPasskeyResource {
     private String buildScopeParameterForClient(ClientModel client) {
         LinkedHashSet<String> scopeNames = new LinkedHashSet<>();
         scopeNames.add(OAuth2Constants.SCOPE_OPENID);
+        scopeNames.add(OAuth2Constants.SCOPE_PROFILE);
+        scopeNames.add(OAuth2Constants.SCOPE_EMAIL);
+        scopeNames.add("roles");
+        scopeNames.add("web-origins");
+        scopeNames.add("account");
         scopeNames.addAll(client.getClientScopes(true).keySet());
-        scopeNames.addAll(client.getClientScopes(false).keySet());
         return String.join(" ", scopeNames);
     }
 
@@ -543,8 +475,10 @@ public class UserPasskeyResource {
             }
             session().getContext().setClient(client);
 
+            ClientConnection connection = session().getContext().getConnection();
+            String remoteAddress = connection == null ? "127.0.0.1" : connection.getRemoteAddr();
             UserSessionModel userSession = session().sessions().createUserSession(
-                    realm, user, user.getUsername(), "127.0.0.1", "form", true, null, null);
+                    realm, user, user.getUsername(), remoteAddress, OIDCLoginProtocol.LOGIN_PROTOCOL, true, null, null);
 
             AuthenticationManager.createLoginCookie(
                     session(),
@@ -559,8 +493,13 @@ public class UserPasskeyResource {
             if (clientSession == null) {
                 clientSession = session().sessions().createClientSession(realm, client, userSession);
             }
+            clientSession.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
+            clientSession.setTimestamp(Time.currentTime());
 
             String scopeParameter = buildScopeParameterForClient(client);
+            clientSession.setNote(OIDCLoginProtocol.SCOPE_PARAM, scopeParameter);
+            String issuer = Urls.realmIssuer(session().getContext().getUri().getBaseUri(), realm.getName());
+            clientSession.setNote(OIDCLoginProtocol.ISSUER, issuer);
             ClientSessionContext clientSessionCtx = DefaultClientSessionContext.fromClientSessionAndScopeParameter(
                     clientSession, scopeParameter, session());
 
@@ -569,24 +508,38 @@ public class UserPasskeyResource {
                 return buildErrorResponse(Response.Status.INTERNAL_SERVER_ERROR, "Client context is null");
             }
 
+            EventBuilder event = new EventBuilder(realm, session(), connection)
+                    .event(EventType.LOGIN)
+                    .client(client)
+                    .user(user)
+                    .session(userSession);
+
             TokenManager tokenManager = new TokenManager();
-            AccessToken accessToken = tokenManager.createClientAccessToken(
-                    session(), realm, client, user, userSession, clientSessionCtx);
+            var tokenBuilder = tokenManager.responseBuilder(
+                            realm,
+                            client,
+                            event,
+                            session(),
+                            userSession,
+                            clientSessionCtx
+                    )
+                    .generateAccessToken()
+                    .generateRefreshToken()
+                    .generateIDToken();
 
-            var keycloakUri = session().getContext().getUri();
-            if (keycloakUri != null && keycloakUri.getBaseUri() != null) {
-                URI base = keycloakUri.getBaseUri();
-                accessToken.issuer(Urls.realmIssuer(base, realm.getName()).toString());
-            } else {
-                logger.warn("Keycloak URI context missing; token will have no iss (resource server will reject)");
-            }
+            var tokenResponse = tokenBuilder.build();
+            event.success();
 
-            String accessTokenString = session().tokens().encode(accessToken);
-            RefreshToken refreshToken = new RefreshToken(accessToken);
-            String refreshTokenString = session().tokens().encode(refreshToken);
             return jsonOk(Map.of(
-                    "access_token", accessTokenString,
-                    "refresh_token", refreshTokenString
+                    "access_token", PasskeyConfigResolver.firstNonBlank(tokenResponse.getToken(), ""),
+                    "refresh_token", PasskeyConfigResolver.firstNonBlank(tokenResponse.getRefreshToken(), ""),
+                    "id_token", PasskeyConfigResolver.firstNonBlank(tokenResponse.getIdToken(), ""),
+                    "expires_in", tokenResponse.getExpiresIn(),
+                    "refresh_expires_in", tokenResponse.getRefreshExpiresIn(),
+                    "token_type", PasskeyConfigResolver.firstNonBlank(tokenResponse.getTokenType(), "Bearer"),
+                    "scope", PasskeyConfigResolver.firstNonBlank(tokenResponse.getScope(), ""),
+                    "session_state", PasskeyConfigResolver.firstNonBlank(tokenResponse.getSessionState(), ""),
+                    "not-before-policy", tokenResponse.getNotBeforePolicy()
             ));
         } catch (Exception e) {
             logger.error("Token generation failed: " + e.getMessage(), e);
@@ -677,25 +630,6 @@ public class UserPasskeyResource {
             values.add(normalizedCredentialId);
             user.setAttribute(CREDENTIAL_USER_ATTR, values);
         }
-    }
-
-    private void removeCredentialUserMapping(UserModel user, String credentialId) {
-        String normalizedCredentialId = normalizeCredentialId(credentialId);
-        if (normalizedCredentialId == null) {
-            return;
-        }
-
-        List<String> values = new ArrayList<>(user.getAttributeStream(CREDENTIAL_USER_ATTR).toList());
-        if (!values.remove(normalizedCredentialId)) {
-            return;
-        }
-
-        if (values.isEmpty()) {
-            user.removeAttribute(CREDENTIAL_USER_ATTR);
-            return;
-        }
-
-        user.setAttribute(CREDENTIAL_USER_ATTR, values);
     }
 
     private void validateRegistrationCompat(WebAuthnRegistrationManager manager, RegistrationRequest request, RegistrationData data, RegistrationParameters parameters) {
