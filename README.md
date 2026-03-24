@@ -7,7 +7,6 @@ This extension adds passkey APIs to Keycloak at:
 Endpoints:
 
 - `GET /challenge`
-- `GET /get-credential-id?username={username}` (optional username)
 - `POST /save`
 - `POST /authenticate`
 
@@ -17,7 +16,7 @@ The plugin is a Keycloak `RealmResourceProvider` mounted at `/realms/{realm}/pas
 
 1. `GET /challenge` creates a short-lived, single-use challenge in Keycloak server storage.
 2. `POST /save` stores a verified passkey for the currently logged-in user (resolved from the bearer access token).
-3. `POST /authenticate` verifies the WebAuthn assertion, creates a Keycloak user session, sets the Keycloak login cookie, and returns OIDC tokens (`access_token`, `refresh_token`, `id_token`, `session_state`).
+3. `POST /authenticate` verifies the WebAuthn assertion and completes the standard Keycloak browser login flow (including required actions), setting the Keycloak login cookie.
 
 How `check-sso` uses that session:
 
@@ -37,14 +36,14 @@ Restart Keycloak after copying the JAR.
 
 ## 2. Configure Keycloak env vars
 
-- `KC_PASSKEY_CLIENT_ID`: OIDC client used by `/authenticate` to issue tokens.
+- `KC_PASSKEY_CLIENT_ID`: OIDC client used by `/authenticate` to complete browser login flow.
 - `KC_ALLOWED_BROWSER_ORIGIN`: CORS origin regex.
 
 Example:
 
 ```env
 KC_PASSKEY_CLIENT_ID=my-spa-client
-KC_ALLOWED_BROWSER_ORIGIN=https?://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:\\d+)?
+KC_ALLOWED_BROWSER_ORIGIN=https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?
 ```
 
 ## 3. Configure realm/client
@@ -96,7 +95,9 @@ export async function registerPasskey({
   rpName = 'My App'
 }) {
   const baseUrl = passkeyBaseUrl({ keycloakUrl, realm });
-  const { challenge } = await getJson(`${baseUrl}/challenge`);
+  const { challenge } = await getJson(`${baseUrl}/challenge`, {
+    credentials: 'include'
+  });
 
   const userIdBytes = new TextEncoder().encode(username).slice(0, 64);
   const credential = await navigator.credentials.create({
@@ -116,6 +117,7 @@ export async function registerPasskey({
 
   await fetch(`${baseUrl}/save`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${accessToken}`
@@ -124,24 +126,23 @@ export async function registerPasskey({
       credentialId: toBase64Url(credential.rawId),
       rawId: toBase64Url(credential.rawId),
       clientDataJSON: toBase64Url(credential.response.clientDataJSON),
-      attestationObject: toBase64Url(credential.response.attestationObject)
+      attestationObject: toBase64Url(credential.response.attestationObject),
+      challenge
     })
   }).then(async (res) => {
     if (!res.ok) throw new Error(await res.text());
   });
 }
 
-export async function authenticateWithPasskey({ keycloakUrl, realm, username }) {
+export async function authenticateWithPasskey({ keycloakUrl, realm }) {
   const baseUrl = passkeyBaseUrl({ keycloakUrl, realm });
-  const query = username ? `?username=${encodeURIComponent(username)}` : '';
-  const { challenge, credentialId } = await getJson(`${baseUrl}/get-credential-id${query}`);
+  const { challenge } = await getJson(`${baseUrl}/challenge`, {
+    credentials: 'include'
+  });
 
   const assertion = await navigator.credentials.get({
     publicKey: {
       challenge: fromBase64Url(challenge),
-      ...(credentialId
-        ? { allowCredentials: [{ type: 'public-key', id: fromBase64Url(credentialId) }] }
-        : {}),
       userVerification: 'preferred'
     }
   });
@@ -150,7 +151,7 @@ export async function authenticateWithPasskey({ keycloakUrl, realm, username }) 
     throw new Error('Incomplete authentication assertion');
   }
 
-  return getJson(`${baseUrl}/authenticate`, {
+  const res = await fetch(`${baseUrl}/authenticate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
@@ -163,6 +164,10 @@ export async function authenticateWithPasskey({ keycloakUrl, realm, username }) 
       challenge
     })
   });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Passkey auth failed: ${res.status}`);
+  }
 }
 ```
 
@@ -181,16 +186,17 @@ await registerPasskey({
 });
 
 // login button: passkey-only auth
-const tokens = await authenticateWithPasskey({
+await authenticateWithPasskey({
   keycloakUrl: 'http://localhost:8080',
   realm: 'demo'
 });
-console.log('Access token:', tokens.access_token);
+window.location.replace('/');
 ```
 
 ## 5. Important notes
 
 - Challenge TTL is `120s` and single-use.
-- `/save` requires `Authorization: Bearer <token>`.
-- `/authenticate` validates passkey + challenge and returns Keycloak tokens.
+- `/challenge`, `/save`, and `/authenticate` should be called with `credentials: 'include'` so the auth-session cookie is preserved.
+- `/save` requires `Authorization: Bearer <token>` and the issued registration `challenge`.
+- `/authenticate` validates passkey + challenge and completes browser-flow login (it does not return tokens directly).
 - If you get CORS errors, fix `KC_ALLOWED_BROWSER_ORIGIN` and client `Web Origins`.
