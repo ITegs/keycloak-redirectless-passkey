@@ -478,16 +478,8 @@ public class UserPasskeyResource {
             ClientConnection connection = session().getContext().getConnection();
             String remoteAddress = connection == null ? "127.0.0.1" : connection.getRemoteAddr();
             UserSessionModel userSession = session().sessions().createUserSession(
-                    realm, user, user.getUsername(), remoteAddress, OIDCLoginProtocol.LOGIN_PROTOCOL, true, null, null);
-
-            AuthenticationManager.createLoginCookie(
-                    session(),
-                    realm,
-                    user,
-                    userSession,
-                    session().getContext().getUri(),
-                    session().getContext().getConnection()
-            );
+                    realm, user, user.getUsername(), remoteAddress, OIDCLoginProtocol.LOGIN_PROTOCOL, false, null, null);
+            userSession.setLastSessionRefresh(Time.currentTime());
 
             AuthenticatedClientSessionModel clientSession = userSession.getAuthenticatedClientSessionByClient(client.getId());
             if (clientSession == null) {
@@ -507,6 +499,15 @@ public class UserPasskeyResource {
                 logger.error("Client context is still null after setting.");
                 return buildErrorResponse(Response.Status.INTERNAL_SERVER_ERROR, "Client context is null");
             }
+
+            AuthenticationManager.createLoginCookie(
+                    session(),
+                    realm,
+                    user,
+                    userSession,
+                    session().getContext().getUri(),
+                    connection
+            );
 
             EventBuilder event = new EventBuilder(realm, session(), connection)
                     .event(EventType.LOGIN)
