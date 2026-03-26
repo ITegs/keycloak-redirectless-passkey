@@ -1,5 +1,21 @@
 # Keycloak Passkey Extension Integration (Quick Guide)
 
+## Admin/Dev quick summary
+
+To use this extension, you install one custom Keycloak provider JAR and configure Keycloak plus realm/client settings to match your environment. Required customizations are:
+
+- Deploy `custom-endpoint-1.0-SNAPSHOT.jar` to `keycloak/providers/` and restart Keycloak.
+- Set `KC_PASSKEY_CLIENT_ID` to the OIDC client used for browser login completion.
+- Set `KC_ALLOWED_BROWSER_ORIGIN` to your client origin(s) for CORS.
+- Enable Passwordless WebAuthn in the realm and set the Passwordless RP ID to your app host.
+- Configure the matching client with correct `Web Origins` and `Redirect URIs`.
+
+After that, your client calls `/realms/{realm}/passkey/{challenge|save|authenticate}` with `credentials: 'include'`, and only client/realm URL values typically need app-side adjustment.
+
+---
+
+## How to use it?
+
 This extension adds passkey APIs to Keycloak at:
 
 `/realms/{realm}/passkey/*`
@@ -20,7 +36,7 @@ The plugin is a Keycloak `RealmResourceProvider` mounted at `/realms/{realm}/pas
 
 How `check-sso` uses that session:
 
-- The frontend calls `/authenticate` with `credentials: 'include'`, so the Keycloak session cookie is written in the browser.
+- The client calls `/authenticate` with `credentials: 'include'`, so the Keycloak session cookie is written in the browser.
 - After a successful passkey login, the app redirects to `/` and runs `keycloak.init({ onLoad: 'check-sso' })`.
 - `check-sso` uses the existing Keycloak browser session (cookie) to silently authenticate and provide fresh tokens in `keycloak.token`/`keycloak.tokenParsed` for subsequent API calls.
 
@@ -53,10 +69,10 @@ In your realm:
 1. Enable Passwordless WebAuthn.
 2. Set Passwordless RP ID to your app host (e.g. `localhost` in local dev).
 3. Ensure client `clientId == KC_PASSKEY_CLIENT_ID`.
-4. Add your frontend URL to `Web Origins`.
+4. Add your client URL to `Web Origins`.
 5. Add callback URLs to `Redirect URIs`.
 
-## 4. Copy-paste frontend example
+## 4. Copy-paste client example
 
 Create `passkeyClient.js` in your app:
 
