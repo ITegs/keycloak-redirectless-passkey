@@ -167,18 +167,13 @@ final class PasskeyWebAuthnService {
     }
 
     /**
-     * Builds the registration manager used to validate attestation payloads.
-     */
-    protected WebAuthnRegistrationManager createWebAuthnRegistrationManager() {
-        return WebAuthnRegistrationManager.createNonStrictWebAuthnRegistrationManager(new ObjectConverter());
-    }
-
-    /**
      * Parses and validates registration payload data.
      */
     private RegistrationData validateRegistration(RegistrationRequest request, RegistrationParameters parameters) {
         try {
-            return createWebAuthnRegistrationManager().verify(request, parameters);
+            return WebAuthnRegistrationManager
+                    .createNonStrictWebAuthnRegistrationManager(new ObjectConverter())
+                    .verify(request, parameters);
         } catch (DataConversionException | VerificationException e) {
             throw new IllegalArgumentException("Passkey registration validation failed: " + e.getMessage(), e);
         }
