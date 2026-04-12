@@ -23,6 +23,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.WebAuthnPolicy;
 import org.keycloak.models.credential.WebAuthnCredentialModel;
+import org.keycloak.models.ClientModel;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -30,26 +31,26 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 final class PasskeyWebAuthnService {
 
     private static final String PASSKEY_TYPE = WebAuthnCredentialModel.TYPE_PASSWORDLESS;
     private static final String CREDENTIAL_USER_ATTR = "passkey-credential-id";
     private static final String HEADER_ORIGIN = "Origin";
+    private static final String ANY_ORIGIN = "*";
 
     private final KeycloakSession session;
-    private final Pattern allowedBrowserOrigin;
+    private final PasskeyClientSupport clientSupport;
 
     /**
      * Creates WebAuthn helper logic bound to the current request.
      *
      * @param session Keycloak request session
-     * @param allowedBrowserOrigin compiled allowed browser origin pattern
+     * @param clientSupport helper for resolving configured client
      */
-    PasskeyWebAuthnService(KeycloakSession session, Pattern allowedBrowserOrigin) {
+    PasskeyWebAuthnService(KeycloakSession session, PasskeyClientSupport clientSupport) {
         this.session = session;
-        this.allowedBrowserOrigin = allowedBrowserOrigin;
+        this.clientSupport = clientSupport;
     }
 
     /**
@@ -244,7 +245,7 @@ final class PasskeyWebAuthnService {
     }
 
     /**
-     * Extracts and validates the request {@code Origin} header against configured regex.
+     * Extracts and validates the request {@code Origin} header against configured allowlist.
      */
     private String requireAllowedOrigin() {
         var headers = session.getContext().getRequestHeaders();
@@ -254,10 +255,38 @@ final class PasskeyWebAuthnService {
         }
 
         String origin = normalizeOrigin(originHeader.trim());
-        if (!allowedBrowserOrigin.matcher(origin).matches()) {
+        if (!isAllowedOrigin(origin)) {
             throw new IllegalArgumentException("Origin is not allowed");
         }
         return origin;
+    }
+
+    private boolean isAllowedOrigin(String origin) {
+        RealmModel realm = requireRealm();
+        ClientModel client = clientSupport.requireConfiguredClient(realm);
+        Set<String> configuredWebOrigins = client.getWebOrigins();
+        if (configuredWebOrigins == null || configuredWebOrigins.isEmpty()) {
+            return false;
+        }
+
+        for (String configuredOrigin : configuredWebOrigins) {
+            if (configuredOrigin == null || configuredOrigin.isBlank()) {
+                continue;
+            }
+            String trimmedOrigin = configuredOrigin.trim();
+            if (ANY_ORIGIN.equals(trimmedOrigin)) {
+                return true;
+            }
+            try {
+                if (normalizeOrigin(trimmedOrigin).equals(origin)) {
+                    return true;
+                }
+            } catch (IllegalArgumentException ignored) {
+                // Ignore non-origin entries and continue evaluation.
+            }
+        }
+
+        return false;
     }
 
     /**

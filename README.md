@@ -6,7 +6,6 @@ To use this extension, you install one custom Keycloak provider JAR and configur
 
 - Deploy `custom-endpoint-1.0-SNAPSHOT.jar` to `keycloak/providers/` and restart Keycloak.
 - Set `KC_PASSKEY_CLIENT_ID` to the OIDC client used for browser login completion.
-- Set `KC_ALLOWED_BROWSER_ORIGIN` to your client origin(s) for CORS.
 - Enable Passwordless WebAuthn in the realm and set the Passwordless RP ID to your app host.
 - Configure the matching client with correct `Web Origins` and `Redirect URIs`.
 - Configure silent `check-sso` in your SPA and serve a callback page (for example `/silent-check-sso.html`).
@@ -54,13 +53,11 @@ Restart Keycloak after copying the JAR.
 ## 2. Configure Keycloak env vars
 
 - `KC_PASSKEY_CLIENT_ID`: OIDC client used by `/authenticate` to complete browser login flow.
-- `KC_ALLOWED_BROWSER_ORIGIN`: CORS origin regex.
 
 Example:
 
 ```env
 KC_PASSKEY_CLIENT_ID=my-spa-client
-KC_ALLOWED_BROWSER_ORIGIN=https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?
 ```
 
 ## 3. Configure realm/client
@@ -245,4 +242,4 @@ await logout();
 - `/save` requires `Authorization: Bearer <token>` and the issued registration `challenge`.
 - `/authenticate` should be called with `credentials: 'include'`; on success it typically returns `204` after writing login cookies.
 - Re-run `check-sso` after `/authenticate` to hydrate tokens into your SPA client (prefer `silentCheckSsoRedirectUri` + `silentCheckSsoFallback: false`).
-- If you get CORS errors, fix `KC_ALLOWED_BROWSER_ORIGIN` and client `Web Origins`.
+- If you get CORS errors, fix the configured client `Web Origins`.

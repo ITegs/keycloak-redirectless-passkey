@@ -32,6 +32,10 @@ final class PasskeyBrowserLoginService {
     private static final String HEADER_ORIGIN = "Origin";
     private static final String HEADER_REFERER = "Referer";
     private static final String RESPONSE_MODE_QUERY = "query";
+    private static final String EVENT_DETAIL_AUTH_METHOD = "auth_method";
+    private static final String EVENT_DETAIL_PASSKEY_OPERATION = "passkey_operation";
+    private static final String EVENT_DETAIL_VALUE_PASSKEY = "passkey";
+    private static final String PASSKEY_OPERATION_AUTHENTICATE = "authenticate";
 
     private final KeycloakSession session;
     private final PasskeyClientSupport clientSupport;
@@ -69,7 +73,9 @@ final class PasskeyBrowserLoginService {
         EventBuilder event = new EventBuilder(realm, session, connection)
                 .event(EventType.LOGIN)
                 .client(client)
-                .user(user);
+                .user(user)
+                .detail(EVENT_DETAIL_AUTH_METHOD, EVENT_DETAIL_VALUE_PASSKEY)
+                .detail(EVENT_DETAIL_PASSKEY_OPERATION, PASSKEY_OPERATION_AUTHENTICATE);
         return AuthenticationManager.nextActionAfterAuthentication(
                 session,
                 authenticationSession,

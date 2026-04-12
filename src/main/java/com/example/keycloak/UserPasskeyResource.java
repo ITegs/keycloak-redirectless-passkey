@@ -9,6 +9,8 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
+import org.keycloak.events.EventBuilder;
+import org.keycloak.events.EventType;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -19,15 +21,22 @@ import org.keycloak.services.managers.AppAuthManager;
 import org.keycloak.services.managers.AuthenticationManager;
 
 import java.util.Map;
-import java.util.regex.Pattern;
 
 @Path("/")
 public class UserPasskeyResource {
 
     private static final Logger logger = Logger.getLogger(UserPasskeyResource.class);
+    private static final String EVENT_DETAIL_AUTH_METHOD = "auth_method";
+    private static final String EVENT_DETAIL_PASSKEY_OPERATION = "passkey_operation";
+    private static final String EVENT_DETAIL_REASON = "reason";
+    private static final String EVENT_DETAIL_CREDENTIAL_ID_PREFIX = "credential_id_prefix";
+    private static final String EVENT_DETAIL_VALUE_PASSKEY = "passkey";
+    private static final String PASSKEY_OPERATION_REGISTER = "register";
+    private static final String PASSKEY_OPERATION_AUTHENTICATE = "authenticate";
+    private static final String EVENT_ERROR_PASSKEY_REGISTER_FAILED = "passkey_register_failed";
+    private static final String EVENT_ERROR_PASSKEY_LOGIN_FAILED = "passkey_login_failed";
 
     private final KeycloakSession session;
-    private final Pattern allowedBrowserOrigin;
     private final String clientId;
     private final PasskeyClientSupport clientSupport;
 
@@ -37,19 +46,17 @@ public class UserPasskeyResource {
      * The SPI-managed constructor should be used for normal runtime operation.
      */
     public UserPasskeyResource() {
-        this(null, null, null);
+        this(null, null);
     }
 
     /**
      * Creates the passkey resource with SPI-provided session and resolved configuration.
      *
      * @param session Keycloak request session
-     * @param allowedOriginPattern configured allowed browser origin regex (without anchors)
      * @param clientId configured OIDC client identifier used for passkey flows
      */
-    public UserPasskeyResource(KeycloakSession session, String allowedOriginPattern, String clientId) {
+    public UserPasskeyResource(KeycloakSession session, String clientId) {
         this.session = session;
-        this.allowedBrowserOrigin = compileAllowedOriginPattern(allowedOriginPattern);
         this.clientId = resolveClientId(clientId);
         this.clientSupport = new PasskeyClientSupport(this.clientId);
     }
@@ -96,25 +103,31 @@ public class UserPasskeyResource {
     public Response savePasskey(PasskeyRequest request) {
         Response requestValidation = validateRequestBody(request);
         if (requestValidation != null) {
+            logPasskeyRegisterError(null, "missing_request_body", null);
             return requestValidation;
         }
 
         UserModel user = getUserFromBearerToken();
         if (user == null) {
+            logPasskeyRegisterError(null, "authenticated_user_not_found", null);
             return textResponse(Response.Status.UNAUTHORIZED, "Authenticated user not found from access token");
         }
 
         Response challengeValidation = validateChallenge(challengeService(), request.getChallenge());
         if (challengeValidation != null) {
+            logPasskeyRegisterError(user, "invalid_or_expired_challenge", request.getCredentialId());
             return challengeValidation;
         }
 
         try {
             webAuthnService().registerPasskey(user, request, request.getChallenge());
+            logPasskeyRegisterSuccess(user, request.getCredentialId());
             return textResponse(Response.Status.CREATED, "Passkey stored successfully");
         } catch (IllegalArgumentException e) {
+            logPasskeyRegisterError(user, "invalid_registration_payload", request.getCredentialId());
             return buildErrorResponse(Response.Status.BAD_REQUEST, "Invalid registration payload: " + e.getMessage());
         } catch (IllegalStateException e) {
+            logPasskeyRegisterError(user, "server_configuration_error", request.getCredentialId());
             return handleServerConfigurationError("Passkey registration failed due to server configuration", e);
         }
     }
@@ -132,6 +145,7 @@ public class UserPasskeyResource {
     public Response authenticatePasskey(PasskeyRequest request) {
         Response requestValidation = validateRequestBody(request);
         if (requestValidation != null) {
+            logPasskeyLoginError(null, "missing_request_body", null);
             return requestValidation;
         }
 
@@ -142,34 +156,42 @@ public class UserPasskeyResource {
 
         String requestCredentialId = webAuthnService().resolveCredentialId(request);
         if (requestCredentialId == null) {
+            logPasskeyLoginError(null, "missing_credential_id", null);
             return buildErrorResponse(Response.Status.BAD_REQUEST, "credentialId or rawId is required");
         }
 
         Response challengeValidation = validateChallenge(challengeService(), request.getChallenge());
         if (challengeValidation != null) {
+            logPasskeyLoginError(null, "invalid_or_expired_challenge", requestCredentialId);
             return challengeValidation;
         }
 
         UserModel user = webAuthnService().findUserByCredentialId(realm, requestCredentialId);
         if (user == null) {
+            logPasskeyLoginError(null, "user_not_found_for_credential", requestCredentialId);
             return buildErrorResponse(Response.Status.NOT_FOUND, "User not found for credential");
         }
 
         if (!webAuthnService().hasPasskeyCredential(user, requestCredentialId)) {
-            return buildErrorResponse(Response.Status.NOT_FOUND, "No passkey found for user: " + user.getUsername());
+            logPasskeyLoginError(user, "credential_not_bound_to_user", requestCredentialId);
+            return buildErrorResponse(Response.Status.NOT_FOUND, "No passkey found for credential");
         }
 
         try {
             if (!webAuthnService().authenticatePasskey(user, request, requestCredentialId)) {
+                logPasskeyLoginError(user, "invalid_passkey", requestCredentialId);
                 return buildErrorResponse(Response.Status.UNAUTHORIZED, "Invalid passkey");
             }
 
             return completeBrowserFlowLogin(user, realm);
         } catch (IllegalArgumentException e) {
+            logPasskeyLoginError(user, "invalid_authentication_payload", requestCredentialId);
             return buildErrorResponse(Response.Status.BAD_REQUEST, "Invalid authentication payload: " + e.getMessage());
         } catch (IllegalStateException e) {
+            logPasskeyLoginError(user, "server_configuration_error", requestCredentialId);
             return handleServerConfigurationError("Passkey authentication failed due to server configuration", e);
         } catch (Exception e) {
+            logPasskeyLoginError(user, "browser_flow_completion_failed", requestCredentialId);
             logger.error("Browser-flow completion after passkey authentication failed: " + e.getMessage(), e);
             return buildErrorResponse(Response.Status.INTERNAL_SERVER_ERROR, "Authentication flow failed");
         }
@@ -233,7 +255,7 @@ public class UserPasskeyResource {
      * Creates the WebAuthn service for the current request context.
      */
     private PasskeyWebAuthnService webAuthnService() {
-        return new PasskeyWebAuthnService(session(), allowedBrowserOrigin);
+        return new PasskeyWebAuthnService(session(), clientSupport);
     }
 
     /**
@@ -322,14 +344,6 @@ public class UserPasskeyResource {
         cors.add();
     }
 
-    private static Pattern compileAllowedOriginPattern(String configuredPattern) {
-        String resolvedPattern = PasskeyConfigResolver.firstNonBlank(
-                configuredPattern,
-                PasskeyConfigResolver.resolveAllowedOriginPatternFromEnv()
-        );
-        return Pattern.compile("^" + resolvedPattern + "$");
-    }
-
     private static String resolveClientId(String configuredClientId) {
         return PasskeyConfigResolver.firstNonBlank(
                 configuredClientId,
@@ -385,5 +399,75 @@ public class UserPasskeyResource {
         for (Object setCookieHeader : setCookieHeaders) {
             target.header("Set-Cookie", setCookieHeader);
         }
+    }
+
+    private void logPasskeyRegisterSuccess(UserModel user, String credentialId) {
+        EventBuilder event = eventBuilder(EventType.REGISTER, user);
+        if (event == null) {
+            return;
+        }
+
+        event.detail(EVENT_DETAIL_PASSKEY_OPERATION, PASSKEY_OPERATION_REGISTER);
+        attachCredentialIdDetail(event, credentialId);
+        event.success();
+    }
+
+    private void logPasskeyRegisterError(UserModel user, String reason, String credentialId) {
+        EventBuilder event = eventBuilder(EventType.REGISTER, user);
+        if (event == null) {
+            return;
+        }
+
+        event.detail(EVENT_DETAIL_PASSKEY_OPERATION, PASSKEY_OPERATION_REGISTER);
+        event.detail(EVENT_DETAIL_REASON, reason);
+        attachCredentialIdDetail(event, credentialId);
+        event.error(EVENT_ERROR_PASSKEY_REGISTER_FAILED);
+    }
+
+    private void logPasskeyLoginError(UserModel user, String reason, String credentialId) {
+        EventBuilder event = eventBuilder(EventType.LOGIN_ERROR, user);
+        if (event == null) {
+            return;
+        }
+
+        event.detail(EVENT_DETAIL_PASSKEY_OPERATION, PASSKEY_OPERATION_AUTHENTICATE);
+        event.detail(EVENT_DETAIL_REASON, reason);
+        attachCredentialIdDetail(event, credentialId);
+        event.error(EVENT_ERROR_PASSKEY_LOGIN_FAILED);
+    }
+
+    private EventBuilder eventBuilder(EventType eventType, UserModel user) {
+        RealmModel realm = session().getContext().getRealm();
+        if (realm == null) {
+            return null;
+        }
+
+        EventBuilder event = new EventBuilder(realm, session(), session().getContext().getConnection())
+                .event(eventType)
+                .detail(EVENT_DETAIL_AUTH_METHOD, EVENT_DETAIL_VALUE_PASSKEY);
+        ClientModel configuredClient = clientSupport.resolveConfiguredClient(realm);
+        if (configuredClient != null) {
+            event.client(configuredClient);
+        }
+        if (user != null) {
+            event.user(user);
+        }
+        return event;
+    }
+
+    private void attachCredentialIdDetail(EventBuilder event, String credentialId) {
+        String credentialIdPrefix = credentialIdPrefix(credentialId);
+        if (credentialIdPrefix == null) {
+            return;
+        }
+        event.detail(EVENT_DETAIL_CREDENTIAL_ID_PREFIX, credentialIdPrefix);
+    }
+
+    private String credentialIdPrefix(String credentialId) {
+        if (credentialId == null || credentialId.isBlank()) {
+            return null;
+        }
+        int length = Math.min(10, credentialId.length());
+        return credentialId.substring(0, length);
     }
 }
