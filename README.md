@@ -4,7 +4,7 @@
 
 To use this extension, you install one custom Keycloak provider JAR and configure Keycloak plus realm/client settings to match your environment. Required customizations are:
 
-- Deploy `custom-endpoint-1.0-SNAPSHOT.jar` to `keycloak/providers/` and restart Keycloak.
+- Download the plugin JAR from the latest GitHub release and deploy it to `keycloak/providers/`, then restart Keycloak.
 - Set `KC_PASSKEY_CLIENT_ID` to the OIDC client used for browser login completion.
 - Enable Passwordless WebAuthn in the realm and set the Passwordless RP ID to your app host.
 - Configure the matching client with correct `Web Origins` and `Redirect URIs`.
@@ -40,15 +40,23 @@ How `check-sso` uses that session:
 - After successful authentication, run `keycloak.init({ onLoad: 'check-sso' })` again to hydrate tokens from the new cookie-backed browser session (silent mode recommended).
 - `check-sso` uses the existing Keycloak browser session (cookie) to silently authenticate and provide fresh tokens in `keycloak.token`/`keycloak.tokenParsed` for subsequent API calls.
 
-## 1. Build and deploy
+## 1. Install from GitHub release
 
 ```bash
-cd keycloak-custom-passkey-login
-mvn clean package
-cp target/custom-endpoint-1.0-SNAPSHOT.jar ../keycloak/providers/
+cp custom-endpoint-*.jar ../keycloak/providers/
 ```
 
-Restart Keycloak after copying the JAR.
+1. Open [Releases](/releases/latest).
+2. Download the `custom-endpoint-*.jar` asset.
+3. Copy it to `keycloak/providers/` (example command above).
+4. Restart Keycloak.
+
+### 1.1 Build from source (optional)
+
+```bash
+mvn clean package
+cp target/custom-endpoint-*.jar ../keycloak/providers/
+```
 
 ## 2. Configure Keycloak env vars
 
