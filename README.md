@@ -1,16 +1,28 @@
 # Keycloak Passkey Extension Integration (Quick Guide)
 
-## Admin/Dev quick summary
+## Admin (Keycloak) quick summary
 
-To use this extension, you install one custom Keycloak provider JAR and configure Keycloak plus realm/client settings to match your environment. Required customizations are:
+To enable this extension, Keycloak admins only need to install the provider and configure realm/client settings:
 
-- Download the plugin JAR from the latest GitHub release and deploy it to `keycloak/providers/`, then restart Keycloak.
-- Set `KC_PASSKEY_CLIENT_ID` to the OIDC client used for browser login completion.
-- Enable Passwordless WebAuthn in the realm and set the Passwordless RP ID to your app host.
-- Configure the matching client with correct `Web Origins` and `Redirect URIs`.
-- Configure silent `check-sso` in your SPA and serve a callback page (for example `/silent-check-sso.html`).
+- Download the plugin JAR from the latest GitHub release, copy it to `keycloak/providers/`, then restart Keycloak.
+- Set `KC_PASSKEY_CLIENT_ID` to the OIDC client that should be used by `/authenticate` to complete the browser login
+  flow.
+- In the target realm, enable Passwordless WebAuthn and set the Passwordless RP ID to the host that will use passkeys.
+- Ensure the client with `clientId == KC_PASSKEY_CLIENT_ID` has correct `Web Origins` and `Redirect URIs` for your
+  deployment.
 
-After that, your client calls `/realms/{realm}/passkey/{challenge|save|authenticate}` with `fetch(..., { credentials: 'include' })`. The extension sets CORS via Keycloak's `Cors.auth()` behavior (including `Access-Control-Allow-Credentials: true`) for cross-origin credentialed requests.
+## Dev quick summary
+
+After admin setup is complete, app developers integrate the client flow:
+
+- Serve a silent check-sso callback page (for example `/silent-check-sso.html`) and configure
+  `silentCheckSsoRedirectUri`.
+- Initialize Keycloak with `onLoad: 'check-sso'` (typically with `silentCheckSsoFallback: false`).
+- Call `/realms/{realm}/passkey/challenge` before registration/authentication.
+- Register passkeys via `POST /realms/{realm}/passkey/save` with `Authorization: Bearer <token>` and
+  `credentials: 'include'`.
+- Authenticate via `POST /realms/{realm}/passkey/authenticate` with `credentials: 'include'`, then run `check-sso` again
+  to hydrate fresh tokens.
 
 ---
 
