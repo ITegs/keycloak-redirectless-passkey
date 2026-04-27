@@ -3,6 +3,7 @@ package com.example.keycloak;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.OPTIONS;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
@@ -35,10 +36,9 @@ public class UserPasskeyResource {
     private static final String PASSKEY_OPERATION_AUTHENTICATE = "authenticate";
     private static final String EVENT_ERROR_PASSKEY_REGISTER_FAILED = "passkey_register_failed";
     private static final String EVENT_ERROR_PASSKEY_LOGIN_FAILED = "passkey_login_failed";
+    private static final String OIDC_PROTOCOL = "openid-connect";
 
     private final KeycloakSession session;
-    private final String clientId;
-    private final PasskeyClientSupport clientSupport;
 
     /**
      * Default constructor for CDI environments that require a no-arg constructor.
@@ -46,19 +46,16 @@ public class UserPasskeyResource {
      * The SPI-managed constructor should be used for normal runtime operation.
      */
     public UserPasskeyResource() {
-        this(null, null);
+        this(null);
     }
 
     /**
-     * Creates the passkey resource with SPI-provided session and resolved configuration.
+     * Creates the passkey resource with SPI-provided session.
      *
      * @param session Keycloak request session
-     * @param clientId configured OIDC client identifier used for passkey flows
      */
-    public UserPasskeyResource(KeycloakSession session, String clientId) {
+    public UserPasskeyResource(KeycloakSession session) {
         this.session = session;
-        this.clientId = resolveClientId(clientId);
-        this.clientSupport = new PasskeyClientSupport(this.clientId);
     }
 
     /**
@@ -67,8 +64,10 @@ public class UserPasskeyResource {
      * @return preflight response with CORS headers when client configuration is available
      */
     @OPTIONS
-    @Path("{any:.*}")
-    public Response corsPreflight() {
+    @Path("{clientId}/{any:.*}")
+    public Response corsPreflight(@PathParam("clientId") String pathClientId) {
+        RealmModel realm = session().getContext().getRealm();
+        resolveClientForPath(realm, sanitizePathClientId(pathClientId));
         Response.ResponseBuilder responseBuilder = Response.ok();
         applyCors(responseBuilder, true);
         return responseBuilder.build();
@@ -80,11 +79,26 @@ public class UserPasskeyResource {
      * @return JSON object containing a base64url challenge value
      */
     @GET
-    @Path("challenge")
+    @Path("{clientId}/challenge")
     @Produces(MediaType.APPLICATION_JSON)
-    public Response getChallenge() {
+    public Response getChallenge(@PathParam("clientId") String pathClientId) {
+        RealmModel realm = session().getContext().getRealm();
+        if (realm == null) {
+            return handleServerConfigurationError("Realm context unavailable for passkey challenge", new IllegalStateException("Realm context is unavailable"));
+        }
+
+        String requestedClientId = sanitizePathClientId(pathClientId);
+        if (requestedClientId == null) {
+            return buildErrorResponse(Response.Status.BAD_REQUEST, "clientId path parameter is required");
+        }
+
+        ClientModel client = resolveClientForPath(realm, requestedClientId);
+        if (client == null) {
+            return buildErrorResponse(Response.Status.BAD_REQUEST, unresolvedClientMessage());
+        }
+
         try {
-            return jsonOk(Map.of("challenge", challengeService().issueChallenge()));
+            return jsonOk(Map.of("challenge", challengeService().issueChallenge(client)));
         } catch (IllegalStateException e) {
             return handleServerConfigurationError("Passkey challenge creation failed due to server configuration", e);
         }
@@ -97,37 +111,59 @@ public class UserPasskeyResource {
      * @return created response on success, error response otherwise
      */
     @POST
-    @Path("save")
+    @Path("{clientId}/save")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
-    public Response savePasskey(PasskeyRequest request) {
+    public Response savePasskey(@PathParam("clientId") String pathClientId, PasskeyRequest request) {
+        RealmModel realm = session().getContext().getRealm();
+        if (realm == null) {
+            return handleServerConfigurationError("Realm context unavailable for passkey registration", new IllegalStateException("Realm context is unavailable"));
+        }
+
+        String requestedClientId = sanitizePathClientId(pathClientId);
+        if (requestedClientId == null) {
+            logPasskeyRegisterError(null, "missing_client_id", null);
+            return buildErrorResponse(Response.Status.BAD_REQUEST, "clientId path parameter is required");
+        }
+
+        ClientModel client = resolveClientForPath(realm, requestedClientId);
+        if (client == null) {
+            logPasskeyRegisterError(null, "client_not_resolved", null);
+            return buildErrorResponse(Response.Status.BAD_REQUEST, unresolvedClientMessage());
+        }
+
         Response requestValidation = validateRequestBody(request);
         if (requestValidation != null) {
             logPasskeyRegisterError(null, "missing_request_body", null);
             return requestValidation;
         }
 
-        UserModel user = getUserFromBearerToken();
-        if (user == null) {
+        AuthenticatedTokenContext tokenContext = authenticateBearerToken();
+        if (tokenContext == null || tokenContext.user == null) {
             logPasskeyRegisterError(null, "authenticated_user_not_found", null);
             return textResponse(Response.Status.UNAUTHORIZED, "Authenticated user not found from access token");
         }
 
-        Response challengeValidation = validateChallenge(challengeService(), request.getChallenge());
+        if (tokenContext.client != null && !requestedClientId.equals(tokenContext.client.getClientId())) {
+            logPasskeyRegisterError(tokenContext.user, "requested_client_mismatch", request.getCredentialId());
+            return buildErrorResponse(Response.Status.UNAUTHORIZED, "Requested client does not match bearer token client");
+        }
+
+        Response challengeValidation = validateChallenge(challengeService(), client, request.getChallenge());
         if (challengeValidation != null) {
-            logPasskeyRegisterError(user, "invalid_or_expired_challenge", request.getCredentialId());
+            logPasskeyRegisterError(tokenContext.user, "invalid_or_expired_challenge", request.getCredentialId());
             return challengeValidation;
         }
 
         try {
-            webAuthnService().registerPasskey(user, request, request.getChallenge());
-            logPasskeyRegisterSuccess(user, request.getCredentialId());
+            webAuthnService().registerPasskey(client, tokenContext.user, request, request.getChallenge());
+            logPasskeyRegisterSuccess(tokenContext.user, request.getCredentialId());
             return textResponse(Response.Status.CREATED, "Passkey stored successfully");
         } catch (IllegalArgumentException e) {
-            logPasskeyRegisterError(user, "invalid_registration_payload", request.getCredentialId());
+            logPasskeyRegisterError(tokenContext.user, "invalid_registration_payload", request.getCredentialId());
             return buildErrorResponse(Response.Status.BAD_REQUEST, "Invalid registration payload: " + e.getMessage());
         } catch (IllegalStateException e) {
-            logPasskeyRegisterError(user, "server_configuration_error", request.getCredentialId());
+            logPasskeyRegisterError(tokenContext.user, "server_configuration_error", request.getCredentialId());
             return handleServerConfigurationError("Passkey registration failed due to server configuration", e);
         }
     }
@@ -139,19 +175,31 @@ public class UserPasskeyResource {
      * @return browser flow response on success, error response otherwise
      */
     @POST
-    @Path("authenticate")
+    @Path("{clientId}/authenticate")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
-    public Response authenticatePasskey(PasskeyRequest request) {
+    public Response authenticatePasskey(@PathParam("clientId") String pathClientId, PasskeyRequest request) {
+        RealmModel realm = session().getContext().getRealm();
+        if (realm == null) {
+            return handleServerConfigurationError("Realm context unavailable for passkey authentication", new IllegalStateException("Realm context is unavailable"));
+        }
+
+        String requestedClientId = sanitizePathClientId(pathClientId);
+        if (requestedClientId == null) {
+            logPasskeyLoginError(null, "missing_client_id", null);
+            return buildErrorResponse(Response.Status.BAD_REQUEST, "clientId path parameter is required");
+        }
+
+        ClientModel client = resolveClientForPath(realm, requestedClientId);
+        if (client == null) {
+            logPasskeyLoginError(null, "client_not_resolved", null);
+            return buildErrorResponse(Response.Status.BAD_REQUEST, unresolvedClientMessage());
+        }
+
         Response requestValidation = validateRequestBody(request);
         if (requestValidation != null) {
             logPasskeyLoginError(null, "missing_request_body", null);
             return requestValidation;
-        }
-
-        RealmModel realm = session().getContext().getRealm();
-        if (realm == null) {
-            return handleServerConfigurationError("Realm context unavailable for passkey authentication", new IllegalStateException("Realm context is unavailable"));
         }
 
         String requestCredentialId = webAuthnService().resolveCredentialId(request);
@@ -160,7 +208,7 @@ public class UserPasskeyResource {
             return buildErrorResponse(Response.Status.BAD_REQUEST, "credentialId or rawId is required");
         }
 
-        Response challengeValidation = validateChallenge(challengeService(), request.getChallenge());
+        Response challengeValidation = validateChallenge(challengeService(), client, request.getChallenge());
         if (challengeValidation != null) {
             logPasskeyLoginError(null, "invalid_or_expired_challenge", requestCredentialId);
             return challengeValidation;
@@ -178,12 +226,12 @@ public class UserPasskeyResource {
         }
 
         try {
-            if (!webAuthnService().authenticatePasskey(user, request, requestCredentialId)) {
+            if (!webAuthnService().authenticatePasskey(client, user, request, requestCredentialId)) {
                 logPasskeyLoginError(user, "invalid_passkey", requestCredentialId);
                 return buildErrorResponse(Response.Status.UNAUTHORIZED, "Invalid passkey");
             }
 
-            return completeBrowserFlowLogin(user, realm);
+            return completeBrowserFlowLogin(user, realm, client);
         } catch (IllegalArgumentException e) {
             logPasskeyLoginError(user, "invalid_authentication_payload", requestCredentialId);
             return buildErrorResponse(Response.Status.BAD_REQUEST, "Invalid authentication payload: " + e.getMessage());
@@ -200,9 +248,9 @@ public class UserPasskeyResource {
     /**
      * Resolves the current user from the bearer token in request headers using Keycloak's authenticator.
      *
-     * @return authenticated user, or {@code null} when token validation fails
+     * @return authenticated token context, or {@code null} when token validation fails
      */
-    private UserModel getUserFromBearerToken() {
+    private AuthenticatedTokenContext authenticateBearerToken() {
         RealmModel realm = session().getContext().getRealm();
         if (realm == null) {
             return null;
@@ -224,14 +272,7 @@ public class UserPasskeyResource {
             return null;
         }
 
-        if (clientId != null && !clientId.isBlank()) {
-            ClientModel tokenClient = authResult.getClient();
-            if (tokenClient == null || !clientId.equals(tokenClient.getClientId())) {
-                return null;
-            }
-        }
-
-        return authResult.getUser();
+        return new AuthenticatedTokenContext(authResult.getUser(), authResult.getClient());
     }
 
     /**
@@ -248,21 +289,21 @@ public class UserPasskeyResource {
      * Creates the challenge service for the current request context.
      */
     private PasskeyChallengeService challengeService() {
-        return new PasskeyChallengeService(session(), clientSupport);
+        return new PasskeyChallengeService(session());
     }
 
     /**
      * Creates the WebAuthn service for the current request context.
      */
     private PasskeyWebAuthnService webAuthnService() {
-        return new PasskeyWebAuthnService(session(), clientSupport);
+        return new PasskeyWebAuthnService(session());
     }
 
     /**
      * Creates the browser-login service for the current request context.
      */
     private PasskeyBrowserLoginService browserLoginService() {
-        return new PasskeyBrowserLoginService(session(), clientSupport);
+        return new PasskeyBrowserLoginService(session());
     }
 
     /**
@@ -304,8 +345,9 @@ public class UserPasskeyResource {
      * Builds a Keycloak-style error response and applies CORS headers.
      */
     private Response buildErrorResponse(Response.Status status, String message) {
+        String resolvedMessage = message == null ? "" : message;
         return withCors(ErrorResponse.error(
-                PasskeyConfigResolver.firstNonBlank(message, ""),
+                resolvedMessage,
                 status
         ).getResponse());
     }
@@ -320,13 +362,17 @@ public class UserPasskeyResource {
     }
 
     /**
-     * Applies Keycloak CORS settings based on configured client web origins.
+     * Applies Keycloak CORS settings based on resolved client web origins.
      *
      * @param responseBuilder response builder to mutate
      * @param preflight whether to apply preflight-specific headers
      */
     private void applyCors(Response.ResponseBuilder responseBuilder, boolean preflight) {
-        ClientModel corsClient = clientSupport.resolveConfiguredClient(session().getContext().getRealm());
+        if (session().getContext().getRealm() == null) {
+            return;
+        }
+
+        ClientModel corsClient = session().getContext().getClient();
         if (corsClient == null) {
             return;
         }
@@ -344,13 +390,6 @@ public class UserPasskeyResource {
         cors.add();
     }
 
-    private static String resolveClientId(String configuredClientId) {
-        return PasskeyConfigResolver.firstNonBlank(
-                configuredClientId,
-                PasskeyConfigResolver.resolveClientIdFromEnv()
-        );
-    }
-
     private Response validateRequestBody(PasskeyRequest request) {
         if (request == null) {
             return buildErrorResponse(Response.Status.BAD_REQUEST, "Request body is required");
@@ -358,15 +397,15 @@ public class UserPasskeyResource {
         return null;
     }
 
-    private Response validateChallenge(PasskeyChallengeService challengeService, String challenge) {
-        if (challengeService.consumeChallenge(challenge)) {
+    private Response validateChallenge(PasskeyChallengeService challengeService, ClientModel client, String challenge) {
+        if (challengeService.consumeChallenge(client, challenge)) {
             return null;
         }
         return buildErrorResponse(Response.Status.UNAUTHORIZED, "Invalid or expired challenge");
     }
 
-    private Response completeBrowserFlowLogin(UserModel user, RealmModel realm) {
-        Response browserFlowResponse = browserLoginService().completeLogin(user, realm);
+    private Response completeBrowserFlowLogin(UserModel user, RealmModel realm, ClientModel client) {
+        Response browserFlowResponse = browserLoginService().completeLogin(user, realm, client);
         if (browserFlowResponse == null) {
             return buildErrorResponse(Response.Status.INTERNAL_SERVER_ERROR, "Authentication flow failed");
         }
@@ -378,6 +417,46 @@ public class UserPasskeyResource {
         Response.ResponseBuilder responseBuilder = Response.noContent();
         copySetCookieHeaders(browserFlowResponse, responseBuilder);
         return withCors(responseBuilder.build());
+    }
+
+    private ClientModel resolveClientForPath(RealmModel realm, String pathClientId) {
+        if (realm == null || pathClientId == null || pathClientId.isBlank()) {
+            return null;
+        }
+
+        ClientModel client = realm.getClientByClientId(pathClientId.trim());
+        if (!isOidcRealmClient(realm, client)) {
+            return null;
+        }
+
+        if (client != null) {
+            session().getContext().setClient(client);
+        }
+        return client;
+    }
+
+    private boolean isOidcRealmClient(RealmModel realm, ClientModel client) {
+        if (realm == null || client == null || !client.isEnabled()) {
+            return false;
+        }
+
+        String protocol = client.getProtocol();
+        if (protocol != null && !OIDC_PROTOCOL.equals(protocol)) {
+            return false;
+        }
+
+        return realm.getClientById(client.getId()) != null;
+    }
+
+    private String sanitizePathClientId(String pathClientId) {
+        if (pathClientId == null || pathClientId.isBlank()) {
+            return null;
+        }
+        return pathClientId.trim();
+    }
+
+    private String unresolvedClientMessage() {
+        return "Unable to resolve OIDC client for provided path clientId.";
     }
 
     private boolean isRedirectResponse(Response response) {
@@ -445,9 +524,9 @@ public class UserPasskeyResource {
         EventBuilder event = new EventBuilder(realm, session(), session().getContext().getConnection())
                 .event(eventType)
                 .detail(EVENT_DETAIL_AUTH_METHOD, EVENT_DETAIL_VALUE_PASSKEY);
-        ClientModel configuredClient = clientSupport.resolveConfiguredClient(realm);
-        if (configuredClient != null) {
-            event.client(configuredClient);
+        ClientModel currentClient = session().getContext().getClient();
+        if (currentClient != null) {
+            event.client(currentClient);
         }
         if (user != null) {
             event.user(user);
@@ -469,5 +548,15 @@ public class UserPasskeyResource {
         }
         int length = Math.min(10, credentialId.length());
         return credentialId.substring(0, length);
+    }
+
+    private static final class AuthenticatedTokenContext {
+        private final UserModel user;
+        private final ClientModel client;
+
+        private AuthenticatedTokenContext(UserModel user, ClientModel client) {
+            this.user = user;
+            this.client = client;
+        }
     }
 }

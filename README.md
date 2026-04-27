@@ -5,11 +5,8 @@
 To enable this extension, Keycloak admins only need to install the provider and configure realm/client settings:
 
 - Download the plugin JAR from the latest GitHub release, copy it to `keycloak/providers/`, then restart Keycloak.
-- Set `KC_PASSKEY_CLIENT_ID` to the OIDC client that should be used by `/authenticate` to complete the browser login
-  flow.
 - In the target realm, enable Passwordless WebAuthn and set the Passwordless RP ID to the host that will use passkeys.
-- Ensure the client with `clientId == KC_PASSKEY_CLIENT_ID` has correct `Web Origins` and `Redirect URIs` for your
-  deployment.
+- Ensure each app client that should use passkeys has correct `Web Origins` and `Redirect URIs` for your deployment.
 
 ## Dev quick summary
 
@@ -18,10 +15,10 @@ After admin setup is complete, app developers integrate the client flow:
 - Serve a silent check-sso callback page (for example `/silent-check-sso.html`) and configure
   `silentCheckSsoRedirectUri`.
 - Initialize Keycloak with `onLoad: 'check-sso'` (typically with `silentCheckSsoFallback: false`).
-- Call `/realms/{realm}/passkey/challenge` before registration/authentication.
-- Register passkeys via `POST /realms/{realm}/passkey/save` with `Authorization: Bearer <token>` and
+- Call `GET /realms/{realm}/passkey/{clientId}/challenge` before registration/authentication.
+- Register passkeys via `POST /realms/{realm}/passkey/{clientId}/save` with `Authorization: Bearer <token>` and
   `credentials: 'include'`.
-- Authenticate via `POST /realms/{realm}/passkey/authenticate` with `credentials: 'include'`, then run `check-sso` again
+- Authenticate via `POST /realms/{realm}/passkey/{clientId}/authenticate` with `credentials: 'include'`, then run `check-sso` again
   to hydrate fresh tokens.
 
 ---
@@ -32,19 +29,19 @@ This extension adds passkey APIs to Keycloak at:
 
 `/realms/{realm}/passkey/*`
 
-Endpoints:
+Endpoints (required client identification):
 
-- `GET /challenge`
-- `POST /save`
-- `POST /authenticate`
+- `GET /{clientId}/challenge`
+- `POST /{clientId}/save`
+- `POST /{clientId}/authenticate`
 
 ## How the plugin works
 
 The plugin is a Keycloak `RealmResourceProvider` mounted at `/realms/{realm}/passkey/*`.
 
-1. `GET /challenge` creates a short-lived, single-use challenge in Keycloak server storage.
-2. `POST /save` stores a verified passkey for the currently logged-in user (resolved from the bearer access token).
-3. `POST /authenticate` verifies the WebAuthn assertion, completes the standard Keycloak browser login flow (including required actions), sets the Keycloak login cookie, and returns `204 No Content`.
+1. `GET /{clientId}/challenge` creates a short-lived, single-use challenge in Keycloak server storage.
+2. `POST /{clientId}/save` stores a verified passkey for the currently logged-in user (resolved from the bearer access token).
+3. `POST /{clientId}/authenticate` verifies the WebAuthn assertion, completes the standard Keycloak browser login flow (including required actions), sets the Keycloak login cookie, and returns `204 No Content`.
 
 How `check-sso` uses that session:
 
@@ -70,15 +67,9 @@ mvn clean package
 cp target/custom-endpoint-*.jar ../keycloak/providers/
 ```
 
-## 2. Configure Keycloak env vars
+## 2. Keycloak setup (no extension env vars)
 
-- `KC_PASSKEY_CLIENT_ID`: OIDC client used by `/authenticate` to complete browser login flow.
-
-Example:
-
-```env
-KC_PASSKEY_CLIENT_ID=my-spa-client
-```
+No extension env var is required for client selection.
 
 ## 3. Configure realm/client
 
@@ -86,7 +77,7 @@ In your realm:
 
 1. Enable Passwordless WebAuthn.
 2. Set Passwordless RP ID to your app host (e.g. `localhost` in local dev).
-3. Ensure client `clientId == KC_PASSKEY_CLIENT_ID`.
+3. Configure each app client that will use passkey login.
 4. Add your client URL to `Web Origins`.
 5. Add callback URLs to `Redirect URIs`.
 6. Add your silent check-sso callback URL to `Redirect URIs` (for example `http://localhost:3000/silent-check-sso.html`, or covered by wildcard).
@@ -140,7 +131,7 @@ function fromBase64Url(value) {
 }
 
 function passkeyUrl(path) {
-  return `${keycloakConfig.url}/realms/${encodeURIComponent(keycloakConfig.realm)}/passkey/${path}`;
+  return `${keycloakConfig.url}/realms/${encodeURIComponent(keycloakConfig.realm)}/passkey/${encodeURIComponent(keycloakConfig.clientId)}/${path}`;
 }
 
 async function getChallenge() {
@@ -258,6 +249,7 @@ await logout();
 ## 5. Important notes
 
 - Challenge TTL is `120s` and single-use.
+- Client selection is done via path segment `/{clientId}/...`.
 - `/challenge` and `/save` should be called with `credentials: 'include'` so auth cookies/sessions are preserved.
 - `/save` requires `Authorization: Bearer <token>` and the issued registration `challenge`.
 - `/authenticate` should be called with `credentials: 'include'`; on success it typically returns `204` after writing login cookies.

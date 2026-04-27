@@ -24,6 +24,7 @@ import org.keycloak.models.UserModel;
 import org.keycloak.models.WebAuthnPolicy;
 import org.keycloak.models.credential.WebAuthnCredentialModel;
 import org.keycloak.models.ClientModel;
+import org.keycloak.protocol.oidc.utils.RedirectUtils;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -38,19 +39,17 @@ final class PasskeyWebAuthnService {
     private static final String CREDENTIAL_USER_ATTR = "passkey-credential-id";
     private static final String HEADER_ORIGIN = "Origin";
     private static final String ANY_ORIGIN = "*";
+    private static final String WEB_ORIGIN_USE_REDIRECTS = "+";
 
     private final KeycloakSession session;
-    private final PasskeyClientSupport clientSupport;
 
     /**
      * Creates WebAuthn helper logic bound to the current request.
      *
      * @param session Keycloak request session
-     * @param clientSupport helper for resolving configured client
      */
-    PasskeyWebAuthnService(KeycloakSession session, PasskeyClientSupport clientSupport) {
+    PasskeyWebAuthnService(KeycloakSession session) {
         this.session = session;
-        this.clientSupport = clientSupport;
     }
 
     /**
@@ -60,7 +59,12 @@ final class PasskeyWebAuthnService {
      * @return credential id, preferring {@code credentialId} over {@code rawId}
      */
     String resolveCredentialId(PasskeyRequest request) {
-        return PasskeyConfigResolver.firstNonBlank(request.getCredentialId(), request.getRawId());
+        String credentialId = request.getCredentialId();
+        if (credentialId != null && !credentialId.isBlank()) {
+            return credentialId;
+        }
+        String rawId = request.getRawId();
+        return (rawId == null || rawId.isBlank()) ? null : rawId;
     }
 
     /**
@@ -113,14 +117,14 @@ final class PasskeyWebAuthnService {
      * @param request registration payload
      * @param expectedChallenge challenge issued by this service
      */
-    void registerPasskey(UserModel user, PasskeyRequest request, String expectedChallenge) {
+    void registerPasskey(ClientModel client, UserModel user, PasskeyRequest request, String expectedChallenge) {
         RealmModel realm = requireRealm();
         RegistrationRequest registrationRequest = new RegistrationRequest(
                 decodeRequiredBase64Url(request.getAttestationObject(), "attestationObject"),
                 decodeRequiredBase64Url(request.getClientDataJSON(), "clientDataJSON")
         );
         RegistrationParameters registrationParameters = new RegistrationParameters(
-                buildServerProperty(realm, expectedChallenge),
+                buildServerProperty(realm, client, expectedChallenge),
                 isUserVerificationRequired(realm)
         );
 
@@ -146,7 +150,7 @@ final class PasskeyWebAuthnService {
      * @param credentialId resolved credential id
      * @return {@code true} when assertion is valid
      */
-    boolean authenticatePasskey(UserModel user, PasskeyRequest request, String credentialId) {
+    boolean authenticatePasskey(ClientModel client, UserModel user, PasskeyRequest request, String credentialId) {
         RealmModel realm = requireRealm();
         AuthenticationRequest authenticationRequest = new AuthenticationRequest(
                 decodeRequiredBase64Url(credentialId, "credentialId"),
@@ -159,7 +163,7 @@ final class PasskeyWebAuthnService {
         credentialInput.setAuthenticationRequest(authenticationRequest);
         credentialInput.setAuthenticationParameters(
                 new WebAuthnCredentialModelInput.KeycloakWebAuthnAuthenticationParameters(
-                        buildServerProperty(realm, request.getChallenge()),
+                        buildServerProperty(realm, client, request.getChallenge()),
                         isUserVerificationRequired(realm)
                 )
         );
@@ -209,12 +213,15 @@ final class PasskeyWebAuthnService {
     /**
      * Constructs server property used by WebAuthn registration/authentication validation.
      */
-    private ServerProperty buildServerProperty(RealmModel realm, String challenge) {
+    private ServerProperty buildServerProperty(RealmModel realm, ClientModel client, String challenge) {
         if (challenge == null || challenge.isBlank()) {
             throw new IllegalArgumentException("challenge is required");
         }
+        if (client == null) {
+            throw new IllegalStateException("OIDC client is required");
+        }
         return new ServerProperty(
-                resolveAllowedOrigins(realm),
+                resolveAllowedOrigins(realm, client),
                 resolveRequiredRpId(realm),
                 new DefaultChallenge(challenge),
                 null
@@ -224,10 +231,10 @@ final class PasskeyWebAuthnService {
     /**
      * Resolves accepted origins from request origin and passwordless extra-origin policy entries.
      */
-    private Set<Origin> resolveAllowedOrigins(RealmModel realm) {
+    private Set<Origin> resolveAllowedOrigins(RealmModel realm, ClientModel client) {
         WebAuthnPolicy policy = requirePasswordlessPolicy(realm);
         Set<Origin> origins = new HashSet<>();
-        origins.add(new Origin(requireAllowedOrigin()));
+        origins.add(new Origin(requireAllowedOrigin(client)));
 
         List<String> extraOrigins = policy.getExtraOrigins();
         if (extraOrigins == null) {
@@ -247,7 +254,7 @@ final class PasskeyWebAuthnService {
     /**
      * Extracts and validates the request {@code Origin} header against configured allowlist.
      */
-    private String requireAllowedOrigin() {
+    private String requireAllowedOrigin(ClientModel client) {
         var headers = session.getContext().getRequestHeaders();
         String originHeader = headers == null ? null : headers.getHeaderString(HEADER_ORIGIN);
         if (originHeader == null || originHeader.isBlank()) {
@@ -255,15 +262,13 @@ final class PasskeyWebAuthnService {
         }
 
         String origin = normalizeOrigin(originHeader.trim());
-        if (!isAllowedOrigin(origin)) {
+        if (!isAllowedOrigin(client, origin)) {
             throw new IllegalArgumentException("Origin is not allowed");
         }
         return origin;
     }
 
-    private boolean isAllowedOrigin(String origin) {
-        RealmModel realm = requireRealm();
-        ClientModel client = clientSupport.requireConfiguredClient(realm);
+    private boolean isAllowedOrigin(ClientModel client, String origin) {
         Set<String> configuredWebOrigins = client.getWebOrigins();
         if (configuredWebOrigins == null || configuredWebOrigins.isEmpty()) {
             return false;
@@ -277,6 +282,9 @@ final class PasskeyWebAuthnService {
             if (ANY_ORIGIN.equals(trimmedOrigin)) {
                 return true;
             }
+            if (WEB_ORIGIN_USE_REDIRECTS.equals(trimmedOrigin) && isOriginAllowedByRedirectUri(client, origin)) {
+                return true;
+            }
             try {
                 if (normalizeOrigin(trimmedOrigin).equals(origin)) {
                     return true;
@@ -287,6 +295,13 @@ final class PasskeyWebAuthnService {
         }
 
         return false;
+    }
+
+    private boolean isOriginAllowedByRedirectUri(ClientModel client, String origin) {
+        if (RedirectUtils.verifyRedirectUri(session, origin, client) != null) {
+            return true;
+        }
+        return RedirectUtils.verifyRedirectUri(session, origin + "/", client) != null;
     }
 
     /**
@@ -312,7 +327,8 @@ final class PasskeyWebAuthnService {
         String fallbackRpId = session.getContext().getUri() == null || session.getContext().getUri().getBaseUri() == null
                 ? null
                 : session.getContext().getUri().getBaseUri().getHost();
-        String rpId = PasskeyConfigResolver.firstNonBlank(policy.getRpId(), fallbackRpId);
+        String configuredRpId = policy.getRpId();
+        String rpId = (configuredRpId == null || configuredRpId.isBlank()) ? fallbackRpId : configuredRpId;
         if (rpId == null || rpId.isBlank()) {
             throw new IllegalStateException("Passwordless WebAuthn RP ID is not configured");
         }

@@ -38,17 +38,14 @@ final class PasskeyBrowserLoginService {
     private static final String PASSKEY_OPERATION_AUTHENTICATE = "authenticate";
 
     private final KeycloakSession session;
-    private final PasskeyClientSupport clientSupport;
 
     /**
      * Creates a helper that continues the standard Keycloak browser login flow.
      *
      * @param session Keycloak request session
-     * @param clientSupport helper for resolving configured client
      */
-    PasskeyBrowserLoginService(KeycloakSession session, PasskeyClientSupport clientSupport) {
+    PasskeyBrowserLoginService(KeycloakSession session) {
         this.session = session;
-        this.clientSupport = clientSupport;
     }
 
     /**
@@ -58,8 +55,10 @@ final class PasskeyBrowserLoginService {
      * @param realm current realm
      * @return Keycloak follow-up response from the authentication manager
      */
-    Response completeLogin(UserModel user, RealmModel realm) {
-        ClientModel client = clientSupport.requireConfiguredClient(realm);
+    Response completeLogin(UserModel user, RealmModel realm, ClientModel client) {
+        if (client == null) {
+            throw new IllegalStateException("OIDC client is required for browser flow completion");
+        }
         String redirectUri = resolveValidatedRedirectUri(client);
         if (redirectUri == null) {
             throw new IllegalArgumentException("No valid redirect URI for client");
@@ -115,10 +114,11 @@ final class PasskeyBrowserLoginService {
      * Derives scope to place into the auth session; falls back to {@code openid}.
      */
     private String resolveScopeParameter(ClientModel client) {
-        return PasskeyConfigResolver.firstNonBlank(
-                AuthenticationManager.getRequestedScopes(session, client),
-                OAuth2Constants.SCOPE_OPENID
-        );
+        String requestedScopes = AuthenticationManager.getRequestedScopes(session, client);
+        if (requestedScopes == null || requestedScopes.isBlank()) {
+            return OAuth2Constants.SCOPE_OPENID;
+        }
+        return requestedScopes;
     }
 
     /**

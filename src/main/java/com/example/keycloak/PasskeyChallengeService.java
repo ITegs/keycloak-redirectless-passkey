@@ -20,17 +20,14 @@ final class PasskeyChallengeService {
     private static final String AUTH_NOTE_PASSKEY_CHALLENGE_ISSUED_AT = "passkey.challenge.issuedAt";
 
     private final KeycloakSession session;
-    private final PasskeyClientSupport clientSupport;
 
     /**
      * Creates a challenge service bound to the current request session.
      *
      * @param session Keycloak request session
-     * @param clientSupport helper for resolving configured client
      */
-    PasskeyChallengeService(KeycloakSession session, PasskeyClientSupport clientSupport) {
+    PasskeyChallengeService(KeycloakSession session) {
         this.session = session;
-        this.clientSupport = clientSupport;
     }
 
     /**
@@ -38,9 +35,11 @@ final class PasskeyChallengeService {
      *
      * @return base64url encoded challenge value
      */
-    String issueChallenge() {
+    String issueChallenge(ClientModel client) {
         RealmModel realm = requireRealm();
-        ClientModel client = clientSupport.requireConfiguredClient(realm);
+        if (client == null) {
+            throw new IllegalStateException("OIDC client is required for challenge issuance");
+        }
         AuthenticationSessionModel challengeSession = getOrCreateChallengeSession(realm, client);
         String challenge = generateChallenge();
         challengeSession.setAuthNote(AUTH_NOTE_PASSKEY_CHALLENGE, challenge);
@@ -54,18 +53,13 @@ final class PasskeyChallengeService {
      * @param challenge challenge sent by client
      * @return {@code true} when challenge exists, matches, and is not expired
      */
-    boolean consumeChallenge(String challenge) {
-        if (challenge == null || challenge.isBlank()) {
+    boolean consumeChallenge(ClientModel client, String challenge) {
+        if (client == null || challenge == null || challenge.isBlank()) {
             return false;
         }
 
         RealmModel realm = session.getContext().getRealm();
         if (realm == null) {
-            return false;
-        }
-
-        ClientModel client = clientSupport.resolveConfiguredClient(realm);
-        if (client == null) {
             return false;
         }
 
@@ -101,7 +95,8 @@ final class PasskeyChallengeService {
      */
     private boolean isWithinTtl(String issuedAtRaw) {
         try {
-            long issuedAt = Long.parseLong(PasskeyConfigResolver.firstNonBlank(issuedAtRaw, "0"));
+            String rawValue = (issuedAtRaw == null || issuedAtRaw.isBlank()) ? "0" : issuedAtRaw;
+            long issuedAt = Long.parseLong(rawValue);
             return issuedAt > 0 && (System.currentTimeMillis() - issuedAt) <= CHALLENGE_TTL_MILLIS;
         } catch (NumberFormatException ignored) {
             return false;

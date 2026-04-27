@@ -6,16 +6,14 @@ import org.keycloak.services.resource.RealmResourceProvider;
 public class UserPasskeyProvider implements RealmResourceProvider {
 
     private final KeycloakSession session;
-    private final String clientId;
 
-    public UserPasskeyProvider(KeycloakSession session, String clientId) {
+    public UserPasskeyProvider(KeycloakSession session) {
         this.session = session;
-        this.clientId = clientId;
     }
 
     @Override
     public Object getResource() {
-        return new UserPasskeyResource(session, clientId);
+        return new UserPasskeyResource(session);
     }
 
     @Override
