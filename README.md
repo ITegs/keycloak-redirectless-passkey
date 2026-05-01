@@ -156,9 +156,11 @@ export async function registerPasskey() {
   }
 
   const challenge = await getChallenge();
-  const username = keycloak.tokenParsed?.preferred_username || keycloak.tokenParsed?.sub || 'user';
+  const userId = keycloak.tokenParsed?.sub;
+  if (!userId) throw new Error('Access token subject is required');
+  const username = keycloak.tokenParsed?.preferred_username || userId;
   const displayName = keycloak.tokenParsed?.name || username;
-  const userIdBytes = new TextEncoder().encode(username).slice(0, 64);
+  const userIdBytes = new TextEncoder().encode(userId).slice(0, 64);
 
   const credential = await navigator.credentials.create({
     publicKey: {
@@ -203,6 +205,7 @@ export async function loginWithPasskey() {
     body: JSON.stringify({
       credentialId: toBase64Url(assertion.rawId),
       rawId: toBase64Url(assertion.rawId),
+      userHandle: assertion.response.userHandle ? toBase64Url(assertion.response.userHandle) : null,
       clientDataJSON: toBase64Url(assertion.response.clientDataJSON),
       authenticatorData: toBase64Url(assertion.response.authenticatorData),
       signature: toBase64Url(assertion.response.signature),

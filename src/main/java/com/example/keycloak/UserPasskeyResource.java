@@ -165,6 +165,10 @@ public class UserPasskeyResource {
         } catch (IllegalStateException e) {
             logPasskeyRegisterError(tokenContext.user, "server_configuration_error", request.getCredentialId());
             return handleServerConfigurationError("Passkey registration failed due to server configuration", e);
+        } catch (Exception e) {
+            logPasskeyRegisterError(tokenContext.user, "unexpected_registration_failure", request.getCredentialId());
+            logger.error("Unexpected passkey registration failure: " + e.getMessage(), e);
+            return buildErrorResponse(Response.Status.INTERNAL_SERVER_ERROR, "Passkey registration failed");
         }
     }
 
@@ -214,7 +218,7 @@ public class UserPasskeyResource {
             return challengeValidation;
         }
 
-        UserModel user = webAuthnService().findUserByCredentialId(realm, requestCredentialId);
+        UserModel user = webAuthnService().findUserByCredentialId(realm, request, requestCredentialId);
         if (user == null) {
             logPasskeyLoginError(null, "user_not_found_for_credential", requestCredentialId);
             return buildErrorResponse(Response.Status.NOT_FOUND, "User not found for credential");

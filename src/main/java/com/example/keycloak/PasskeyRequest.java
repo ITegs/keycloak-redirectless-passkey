@@ -13,6 +13,8 @@ public class PasskeyRequest {
 
     private String rawId;
 
+    private String userHandle;
+
     private String attestationObject;
 
     private String clientDataJSON;
