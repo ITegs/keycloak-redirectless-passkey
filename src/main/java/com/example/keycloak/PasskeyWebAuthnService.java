@@ -227,7 +227,7 @@ final class PasskeyWebAuthnService {
             return normalizedBase;
         }
 
-        for (int counter = 2; counter < 10_000; counter++) {
+        for (int counter = 2; counter < 5; counter++) {
             String candidate = truncateLabel(normalizedBase + " (" + counter + ")");
             if (!existingLabels.contains(candidate)) {
                 return candidate;

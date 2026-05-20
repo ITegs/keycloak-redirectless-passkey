@@ -2,13 +2,34 @@
   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>com.example.keycloak</groupId>
+  <groupId>de.tum.cit.aet</groupId>
   <artifactId>custom-passkey</artifactId>
-  <version>v1.3.1</version>
+  <version>1.3.1</version>
   <packaging>jar</packaging>
 
-  <name>custom-passkey</name>
-  <url>http://maven.apache.org</url>
+  <name>keycloak-redirectless-passkey</name>
+  <description>Keycloak extension that adds redirectless passkey flows.</description>
+  <url>https://github.com/ls1intum/keycloak-redirectless-passkey</url>
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://opensource.org/license/mit</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <developers>
+    <developer>
+      <id>ITegs</id>
+      <name>Johannes Pahle</name>
+      <email>joe@jo-dev.de</email>
+    </developer>
+  </developers>
+  <scm>
+    <connection>scm:git:https://github.com/ls1intum/keycloak-redirectless-passkey.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com:ls1intum/keycloak-redirectless-passkey.git</developerConnection>
+    <url>https://github.com/ls1intum/keycloak-redirectless-passkey</url>
+    <tag>HEAD</tag>
+  </scm>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -73,6 +94,55 @@
             </path>
           </annotationProcessorPaths>
         </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <version>0.9.0</version>
+        <extensions>true</extensions>
+        <configuration>
+          <publishingServerId>central</publishingServerId>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.3.1</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals>
+              <goal>jar-no-fork</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.8.0</version>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals>
+              <goal>jar</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-gpg-plugin</artifactId>
+        <version>3.2.7</version>
+        <executions>
+          <execution>
+            <id>sign-artifacts</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>sign</goal>
+            </goals>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>
